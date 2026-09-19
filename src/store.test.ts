@@ -9,6 +9,10 @@ import {
   remaining,
   reserve,
   setServed,
+  increaseSlots,
+  deleteOrder,
+  OrderDeletedError,
+  readPending,
   type Order,
   type Store,
 } from "./store";
@@ -144,5 +148,100 @@ describe("Firebase atomic transactions", () => {
     vi.stubGlobal("fetch", fetcher);
     await expect(reserve(order())).rejects.toThrow("safely check stock");
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("admin inventory and deletion", () => {
+  it("reads the original 30-slot schema without a migration", () => {
+    const existing = addOrder(emptyStore(), order(2));
+    expect(parseStore(existing)).toEqual(existing);
+    expect(remaining(parseStore(existing))).toBe(28);
+  });
+  it("adds slots without resetting existing reservations", async () => {
+    const existing = addOrder(emptyStore(), order(3));
+    mockDatabase(existing);
+    const next = await increaseSlots({ id: "more-1", quantity: 10 });
+    expect(next.capacity).toBe(40);
+    expect(remaining(next)).toBe(37);
+    expect(next.orders).toEqual(existing.orders);
+    expect(parseStore(next)).toEqual(next);
+  });
+  it("initializes a new database when the admin adds the first slots", async () => {
+    mockDatabase();
+    const next = await increaseSlots({ id: "more-1", quantity: 5 });
+    expect(next.capacity).toBe(35);
+    expect(remaining(next)).toBe(35);
+  });
+  it("applies an uncertain slot addition only once", async () => {
+    mockDatabase();
+    const addition = { id: "more-1", quantity: 5 };
+    await increaseSlots(addition);
+    const retry = await increaseSlots(addition);
+    expect(retry.capacity).toBe(35);
+    expect(retry.slotAdditions).toEqual({ "more-1": 5 });
+  });
+  it.each([0, -1, 1.5, 1001, NaN])(
+    "rejects invalid slot addition %s",
+    async (quantity) => {
+      const db = mockDatabase();
+      await expect(increaseSlots({ id: "more-1", quantity })).rejects.toThrow(
+        "whole number",
+      );
+      expect(db.fetcher).not.toHaveBeenCalled();
+    },
+  );
+  it("supports reservations above 30 after stock is increased", async () => {
+    mockDatabase();
+    const expanded = await increaseSlots({ id: "more-1", quantity: 10 });
+    const next = addOrder(expanded, order(35));
+    expect(remaining(next)).toBe(5);
+    expect(parseStore(next).orders["order-1"].quantity).toBe(35);
+    vi.stubGlobal("localStorage", { getItem: () => JSON.stringify(order(35)) });
+    expect(readPending()?.quantity).toBe(35);
+  });
+  it("deletes a waiting order and releases its quantity exactly once", async () => {
+    mockDatabase(addOrder(emptyStore(), order(3)));
+    const deleted = await deleteOrder("order-1");
+    expect(deleted.orders).toEqual({});
+    expect(remaining(deleted)).toBe(30);
+    expect(remaining(await deleteOrder("order-1"))).toBe(30);
+    expect(JSON.stringify(deleted)).not.toContain("Grace");
+    expect(() => addOrder(deleted, order(3))).toThrow(OrderDeletedError);
+  });
+  it("keeps served quantities consumed when the order is deleted", async () => {
+    mockDatabase(addOrder(emptyStore(), { ...order(3), served: true }));
+    const deleted = await deleteOrder("order-1");
+    expect(deleted.orders).toEqual({});
+    expect(deleted.deletedServedQuantity).toBe(3);
+    expect(remaining(deleted)).toBe(27);
+    expect((await deleteOrder("order-1")).deletedServedQuantity).toBe(3);
+    expect(remaining(await increaseSlots({ id: "more-1", quantity: 5 }))).toBe(
+      32,
+    );
+  });
+  it("safely handles simultaneous restocks, new orders, and deletion", async () => {
+    const db = mockDatabase(addOrder(emptyStore(), order(2, "old")));
+    await Promise.all([
+      increaseSlots({ id: "more-1", quantity: 5 }),
+      increaseSlots({ id: "more-2", quantity: 3 }),
+      reserve(order(4, "new")),
+      deleteOrder("old"),
+    ]);
+    expect(db.read()!.capacity).toBe(38);
+    expect(remaining(db.read()!)).toBe(34);
+    expect(Object.keys(db.read()!.orders)).toEqual(["new"]);
+    expect(db.read()!.deletedOrderIds).toEqual({ old: true });
+  });
+  it("rejects malformed inventory history before writing", () => {
+    expect(() => parseStore({ ...emptyStore(), capacity: -1 })).toThrow();
+    expect(() =>
+      parseStore({ ...emptyStore(), deletedServedQuantity: -1 }),
+    ).toThrow();
+    expect(() =>
+      parseStore({ ...emptyStore(), deletedOrderIds: { old: "yes" } }),
+    ).toThrow();
+    expect(() =>
+      parseStore({ ...emptyStore(), slotAdditions: { more: 0 } }),
+    ).toThrow();
   });
 });

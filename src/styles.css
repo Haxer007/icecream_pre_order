@@ -2214,3 +2214,218 @@ footer > a:last-child {
   margin: 11px auto 0;
   max-width: 290px;
 }
+
+/* Serving-team inventory controls */
+.inventory-panel {
+  border: 1px solid #e4e7d8;
+  border-radius: 13px;
+  background: #f5f5ed;
+  padding: 23px 25px;
+  margin-bottom: 26px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 15px 24px;
+  align-items: center;
+}
+.inventory-panel-heading {
+  display: flex;
+  gap: 13px;
+  align-items: center;
+}
+.inventory-panel h2 {
+  font-size: 17px;
+  letter-spacing: -0.4px;
+}
+.inventory-panel-heading p {
+  font-size: 11px;
+  color: #8b8273;
+  margin-top: 6px;
+  line-height: 1.6;
+}
+.inventory-form {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+}
+.inventory-form label {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  color: #6e705c;
+  margin-bottom: 6px;
+}
+.inventory-form input {
+  width: 92px;
+  height: 43px;
+  font-size: 15px;
+  background: #fffefa;
+}
+.inventory-form .primary-button {
+  width: auto;
+  white-space: nowrap;
+  min-height: 43px;
+}
+.inventory-help {
+  font-size: 9px;
+  color: #908e7b;
+  grid-column: 1 / -1;
+  line-height: 1.7;
+}
+.inventory-panel .notice {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.inventory-success {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: #57714e;
+  line-height: 1.7;
+}
+.order-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.delete-order-button {
+  background: transparent;
+  border: 1px solid #eedcd8;
+  border-radius: 6px;
+  color: #aa6b66;
+  padding: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+}
+.delete-order-button:hover:not(:disabled) {
+  background: #f9e9e5;
+  color: #984b47;
+}
+.delete-order-button span {
+  display: none;
+}
+.delete-dialog {
+  width: min(440px, calc(100% - 36px));
+  padding: 30px;
+  border: 1px solid #e7ded5;
+  border-radius: 18px;
+  background: #fffefa;
+  color: var(--dark);
+  box-shadow: 0 15px 70px #382e2d25;
+}
+.delete-dialog::backdrop {
+  background: #382e2d60;
+  backdrop-filter: blur(3px);
+}
+.delete-dialog-icon {
+  display: grid;
+  place-items: center;
+  width: 51px;
+  height: 51px;
+  border-radius: 13px;
+  background: #f6e7e3;
+  color: #a7635d;
+  margin-bottom: 22px;
+}
+.delete-dialog > .eyebrow {
+  color: #a88375;
+  font-size: 8px;
+}
+.delete-dialog h2 {
+  font-size: 24px;
+  letter-spacing: -0.8px;
+  margin-top: 10px;
+}
+.delete-person {
+  font-weight: 600;
+  font-size: 12px;
+  margin: 15px 0;
+  overflow-wrap: anywhere;
+}
+#delete-description {
+  font-size: 12px;
+  line-height: 1.85;
+  color: #8b7b6e;
+}
+.delete-caution {
+  font-size: 10px;
+  color: #ab796d;
+  margin: 12px 0 23px;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+}
+.danger-button {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  gap: 7px;
+  background: #a45351;
+  color: white;
+  border: 1px solid #a45351;
+  border-radius: 7px;
+  padding: 11px 14px;
+  font-size: 11px;
+}
+.danger-button:hover:not(:disabled) {
+  background: #8e4443;
+}
+@media (max-width: 850px) {
+  .inventory-panel {
+    grid-template-columns: 1fr;
+    padding: 20px;
+    gap: 16px;
+  }
+  .inventory-form {
+    justify-content: flex-start;
+  }
+  .inventory-form input {
+    width: 100px;
+  }
+  .admin-order-bottom {
+    flex-wrap: wrap;
+  }
+}
+@media (max-width: 640px) {
+  .inventory-panel {
+    padding: 18px;
+  }
+  .inventory-panel h2 {
+    font-size: 15px;
+  }
+  .inventory-panel-heading p {
+    font-size: 10px;
+  }
+  .inventory-form {
+    width: 100%;
+  }
+  .inventory-form > div {
+    flex: 1;
+  }
+  .inventory-form input {
+    width: 100%;
+    font-size: 16px;
+  }
+  .inventory-form .primary-button {
+    font-size: 11px;
+  }
+  .inventory-help {
+    font-size: 9px;
+  }
+  .order-actions {
+    margin-left: auto;
+  }
+  .delete-dialog {
+    padding: 25px;
+  }
+  .delete-dialog h2 {
+    font-size: 22px;
+  }
+}

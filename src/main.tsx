@@ -23,16 +23,23 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  Trash2,
   Users,
   WifiOff,
   X,
 } from "lucide-react";
 import {
-  CAPACITY,
   ENDPOINT,
   type Order,
   type Store,
   StockError,
+  OrderDeletedError,
+  SlotValidationError,
+  type SlotAddition,
+  deleteOrder,
+  increaseSlots,
+  readPendingSlots,
+  savePendingSlots,
   clientId,
   emptyStore,
   loadStore,
@@ -219,7 +226,7 @@ function Customer({
   const myOrders = Object.values(data.orders)
     .filter((order) => order.clientId === myId)
     .sort((a, b) => b.createdAt - a.createdAt);
-  const confirmedSuccess = success ? data.orders[success.id] || success : null;
+  const confirmedSuccess = success ? data.orders[success.id] || null : null;
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (busy) return;
@@ -247,7 +254,7 @@ function Customer({
       setPending(null);
       savePending(null);
     } catch (err) {
-      if (err instanceof StockError) {
+      if (err instanceof StockError || err instanceof OrderDeletedError) {
         setPending(null);
         savePending(null);
         void loadStore()
@@ -310,7 +317,7 @@ function Customer({
                 ) : (
                   <>
                     <span className="stock-number">{available}</span> of{" "}
-                    {CAPACITY} ice creams left
+                    {data.capacity} ice creams left
                   </>
                 )}
               </strong>
@@ -322,7 +329,9 @@ function Customer({
             </div>
             <ConnectionLabel connection={connection} />
             <div className="stock-track">
-              <span style={{ width: `${(available / CAPACITY) * 100}%` }} />
+              <span
+                style={{ width: `${(available / data.capacity) * 100}%` }}
+              />
             </div>
           </div>
         </div>
@@ -394,6 +403,13 @@ function Customer({
                   A name, a verse, and a little anticipation.
                 </p>
                 <div className="form-divider" />
+                {success && !confirmedSuccess && (
+                  <div className="notice warning" role="status">
+                    Your reservation was deleted by the serving team. Please
+                    speak to them if you need help, or make a new reservation
+                    below.
+                  </div>
+                )}
                 {connection === "offline" && (
                   <div className="notice warning" role="status">
                     <WifiOff size={17} />
@@ -407,8 +423,9 @@ function Customer({
                   <div className="notice sold-out">
                     <Heart size={18} />
                     <span>
-                      <strong>That's a wrap for this batch!</strong> All 30 ice
-                      creams are reserved. Thank you for sharing the joy.
+                      <strong>That's a wrap for this batch!</strong> All{" "}
+                      {data.capacity} ice creams are reserved or served. Thank
+                      you for sharing the joy.
                     </span>
                   </div>
                 )}
@@ -641,7 +658,7 @@ function Customer({
       <div className="community-note page-width">
         <Heart size={14} />
         <p>
-          A church-family treat, lovingly made in a batch of 30.{" "}
+          A church-family treat, lovingly made to share.{" "}
           <span>
             Please ask the serving team about ingredients & allergens.
           </span>
@@ -667,13 +684,94 @@ function Admin({
   const [filter, setFilter] = useState<"all" | "waiting" | "served">("waiting");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [pendingSlots, setPendingSlots] = useState<SlotAddition | null>(
+    readPendingSlots,
+  );
+  const [slotQuantity, setSlotQuantity] = useState(
+    String(pendingSlots?.quantity || 5),
+  );
+  const [slotError, setSlotError] = useState("");
+  const [slotMessage, setSlotMessage] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<Order | null>(null);
+  const [deleteError, setDeleteError] = useState("");
+  const deleteDialog = useRef<HTMLDialogElement>(null);
+  const currentDeleteTarget = deleteTarget
+    ? data.orders[deleteTarget.id] || deleteTarget
+    : null;
+  useEffect(() => {
+    const dialog = deleteDialog.current;
+    if (!dialog) return;
+    if (deleteTarget && !dialog.open) dialog.showModal();
+    if (!deleteTarget && dialog.open) dialog.close();
+  }, [deleteTarget, unlocked]);
+
+  async function addSlots(event: React.FormEvent) {
+    event.preventDefault();
+    if (busy || connection !== "live") return;
+    const quantity = Number(slotQuantity);
+    if (
+      !pendingSlots &&
+      (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 1000)
+    ) {
+      setSlotError("Enter a whole number from 1 to 1,000 slots.");
+      return;
+    }
+    const addition = pendingSlots || { id: crypto.randomUUID(), quantity };
+    setBusy("add-slots");
+    setSlotError("");
+    setSlotMessage("");
+    setPendingSlots(addition);
+    savePendingSlots(addition);
+    try {
+      const next = await increaseSlots(addition);
+      apply(next);
+      setPendingSlots(null);
+      savePendingSlots(null);
+      setSlotMessage(
+        `${addition.quantity} slot${addition.quantity === 1 ? "" : "s"} added. ${remaining(next)} available out of ${next.capacity} total.`,
+      );
+    } catch (err) {
+      if (err instanceof SlotValidationError) {
+        setPendingSlots(null);
+        savePendingSlots(null);
+      }
+      setSlotError(
+        err instanceof Error
+          ? err.message
+          : "Could not confirm the added slots. Please retry.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget || busy || connection !== "live") return;
+    setBusy(deleteTarget.id);
+    setDeleteError("");
+    try {
+      apply(await deleteOrder(deleteTarget.id));
+      setDeleteTarget(null);
+      setError("");
+    } catch (err) {
+      setDeleteError(
+        err instanceof Error
+          ? err.message
+          : "Could not confirm deletion. Retrying won't release slots twice.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
   const orders = Object.values(data.orders).sort(
     (a, b) => a.createdAt - b.createdAt,
   );
   const waiting = orders.filter((order) => !order.served);
-  const servedCount = orders
-    .filter((order) => order.served)
-    .reduce((sum, order) => sum + order.quantity, 0);
+  const servedCount =
+    (data.deletedServedQuantity || 0) +
+    orders
+      .filter((order) => order.served)
+      .reduce((sum, order) => sum + order.quantity, 0);
   const filtered = orders.filter(
     (order) =>
       (filter === "all" ||
@@ -772,7 +870,7 @@ function Admin({
           </span>
           <strong>
             {remaining(data)}
-            <small> / 30</small>
+            <small> / {data.capacity}</small>
           </strong>
           <ConnectionLabel connection={connection} />
         </div>
@@ -796,6 +894,73 @@ function Admin({
           <p>Happy scoops, happy hearts</p>
         </div>
       </div>
+      <section className="inventory-panel" aria-labelledby="inventory-title">
+        <div className="inventory-panel-heading">
+          <span className="stock-icon">
+            <Plus size={22} />
+          </span>
+          <div>
+            <h2 id="inventory-title">A little more to share</h2>
+            <p>More ice creams ready? Add slots for everyone to reserve.</p>
+          </div>
+        </div>
+        <form className="inventory-form" onSubmit={addSlots}>
+          <div>
+            <label htmlFor="slot-quantity">Slots to add</label>
+            <input
+              id="slot-quantity"
+              type="number"
+              inputMode="numeric"
+              min="1"
+              max="1000"
+              step="1"
+              required
+              value={slotQuantity}
+              disabled={!!busy || !!pendingSlots || connection !== "live"}
+              onChange={(event) => {
+                setSlotQuantity(event.target.value);
+                setSlotMessage("");
+              }}
+              aria-describedby="slot-help"
+            />
+          </div>
+          <button
+            type="submit"
+            className="primary-button"
+            disabled={!!busy || connection !== "live"}
+          >
+            {busy === "add-slots" ? (
+              <LoaderCircle size={16} className="spin" />
+            ) : pendingSlots ? (
+              <RefreshCw size={16} />
+            ) : (
+              <Plus size={16} />
+            )}
+            {pendingSlots ? "Retry adding slots" : "Add slots"}
+          </button>
+        </form>
+        <p id="slot-help" className="inventory-help">
+          Only add ice creams that are ready to serve. This increases the total;
+          it doesn't reset existing orders.
+        </p>
+        {pendingSlots && !busy && (
+          <div className="notice" role="status">
+            An addition of {pendingSlots.quantity} slots needs confirmation.
+            Retry safely—even after a reload, these slots won't be added twice.
+          </div>
+        )}
+        {slotError && (
+          <div className="notice error" role="alert">
+            {slotError}
+          </div>
+        )}
+        {slotMessage && (
+          <div className="inventory-success" role="status">
+            <CheckCircle2 size={16} />
+            {slotMessage}
+          </div>
+        )}
+      </section>
       {connection !== "live" && (
         <div className="notice warning">
           <WifiOff size={17} />
@@ -920,26 +1085,100 @@ function Admin({
                     )}
                     {order.served ? "Served with love" : "Waiting to be served"}
                   </span>
-                  <button
-                    disabled={!!busy || connection !== "live"}
-                    className={order.served ? "undo-button" : "serve-button"}
-                    onClick={() => void toggle(order)}
-                  >
-                    {busy === order.id ? (
-                      <LoaderCircle size={15} className="spin" />
-                    ) : order.served ? (
-                      <RefreshCw size={14} />
-                    ) : (
-                      <Check size={15} />
-                    )}
-                    {order.served ? "Mark as waiting" : "Mark as served"}
-                  </button>
+                  <div className="order-actions">
+                    <button
+                      type="button"
+                      className="delete-order-button"
+                      aria-label={`Delete order for ${order.name}`}
+                      title="Delete order"
+                      disabled={!!busy || connection !== "live"}
+                      onClick={() => {
+                        setDeleteTarget(order);
+                        setDeleteError("");
+                      }}
+                    >
+                      <Trash2 size={15} />
+                      <span>Delete</span>
+                    </button>
+                    <button
+                      disabled={!!busy || connection !== "live"}
+                      className={order.served ? "undo-button" : "serve-button"}
+                      onClick={() => void toggle(order)}
+                    >
+                      {busy === order.id ? (
+                        <LoaderCircle size={15} className="spin" />
+                      ) : order.served ? (
+                        <RefreshCw size={14} />
+                      ) : (
+                        <Check size={15} />
+                      )}
+                      {order.served ? "Mark as waiting" : "Mark as served"}
+                    </button>
+                  </div>
                 </div>
               </article>
             ))}
           </div>
         )}
       </section>
+      <dialog
+        className="delete-dialog"
+        ref={deleteDialog}
+        aria-labelledby="delete-title"
+        aria-describedby="delete-description"
+        onCancel={(event) => {
+          event.preventDefault();
+          if (!busy) setDeleteTarget(null);
+        }}
+      >
+        {currentDeleteTarget && (
+          <>
+            <span className="delete-dialog-icon">
+              <Trash2 size={25} />
+            </span>
+            <span className="eyebrow">PLEASE DOUBLE-CHECK</span>
+            <h2 id="delete-title">Delete this reservation?</h2>
+            <p className="delete-person">
+              {currentDeleteTarget.name} · {currentDeleteTarget.quantity} ice
+              cream{currentDeleteTarget.quantity === 1 ? "" : "s"}
+            </p>
+            <p id="delete-description">
+              The name and verse will be permanently removed.{" "}
+              {currentDeleteTarget.served
+                ? "This order is already served, so its ice creams stay counted as consumed. No slots will be returned."
+                : `${currentDeleteTarget.quantity} slot${currentDeleteTarget.quantity === 1 ? "" : "s"} will become available again if this order is still waiting.`}
+            </p>
+            <p className="delete-caution">This cannot be undone.</p>
+            {deleteError && (
+              <div className="notice error" role="alert">
+                {deleteError}
+              </div>
+            )}
+            <div className="dialog-actions">
+              <button
+                autoFocus
+                className="secondary-button"
+                disabled={!!busy}
+                onClick={() => setDeleteTarget(null)}
+              >
+                Keep order
+              </button>
+              <button
+                className="danger-button"
+                disabled={!!busy || connection !== "live"}
+                onClick={() => void confirmDelete()}
+              >
+                {busy ? (
+                  <LoaderCircle size={16} className="spin" />
+                ) : (
+                  <Trash2 size={16} />
+                )}
+                Delete order
+              </button>
+            </div>
+          </>
+        )}
+      </dialog>
       <p className="admin-footnote">
         <ShieldCheck size={14} /> Marking an order served doesn't change
         available stock. Scoops are reserved when an order is placed.

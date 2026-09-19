@@ -6,6 +6,7 @@ export const CAPACITY = 30;
 const CACHE_KEY = "scoops-scripture:cache:v1";
 const CLIENT_KEY = "scoops-scripture:client:v1";
 const PENDING_KEY = "scoops-scripture:pending:v1";
+const PENDING_SLOTS_KEY = "scoops-scripture:pending-slots:v1";
 
 export type Order = {
   id: string;
@@ -17,7 +18,15 @@ export type Order = {
   served: boolean;
   servedAt?: number | null;
 };
-export type Store = { version: 1; capacity: 30; orders: Record<string, Order> };
+export type Store = {
+  version: 1;
+  capacity: number;
+  orders: Record<string, Order>;
+  deletedOrderIds?: Record<string, true>;
+  deletedServedQuantity?: number;
+  slotAdditions?: Record<string, number>;
+};
+export type SlotAddition = { id: string; quantity: number };
 export const emptyStore = (): Store => ({
   version: 1,
   capacity: 30,
@@ -30,7 +39,8 @@ export function parseStore(value: unknown): Store {
   if (
     !data ||
     data.version !== 1 ||
-    data.capacity !== CAPACITY ||
+    !Number.isSafeInteger(data.capacity) ||
+    data.capacity < 1 ||
     (data.orders != null &&
       (typeof data.orders !== "object" || Array.isArray(data.orders)))
   ) {
@@ -38,6 +48,25 @@ export function parseStore(value: unknown): Store {
       "The order database has an unexpected format. Please contact the serving team.",
     );
   }
+  if (
+    (data.deletedServedQuantity != null &&
+      (!Number.isSafeInteger(data.deletedServedQuantity) ||
+        data.deletedServedQuantity < 0 ||
+        data.deletedServedQuantity > data.capacity)) ||
+    (data.deletedOrderIds != null &&
+      (typeof data.deletedOrderIds !== "object" ||
+        Array.isArray(data.deletedOrderIds) ||
+        Object.values(data.deletedOrderIds).some((value) => value !== true))) ||
+    (data.slotAdditions != null &&
+      (typeof data.slotAdditions !== "object" ||
+        Array.isArray(data.slotAdditions) ||
+        Object.values(data.slotAdditions).some(
+          (value) => !Number.isSafeInteger(value) || value < 1,
+        )))
+  )
+    throw new Error(
+      "The inventory history has an unexpected format. Please contact the serving team.",
+    );
   const orders = data.orders || {};
   for (const [key, order] of Object.entries(orders)) {
     if (
@@ -46,9 +75,9 @@ export function parseStore(value: unknown): Store {
       typeof order.clientId !== "string" ||
       typeof order.name !== "string" ||
       typeof order.verse !== "string" ||
-      !Number.isInteger(order.quantity) ||
+      !Number.isSafeInteger(order.quantity) ||
       order.quantity < 1 ||
-      order.quantity > CAPACITY ||
+      order.quantity > data.capacity ||
       typeof order.createdAt !== "number" ||
       typeof order.served !== "boolean"
     ) {
@@ -63,7 +92,8 @@ export function parseStore(value: unknown): Store {
 export function remaining(data: Store): number {
   return Math.max(
     0,
-    CAPACITY -
+    data.capacity -
+      (data.deletedServedQuantity || 0) -
       Object.values(data.orders).reduce(
         (sum, order) => sum + order.quantity,
         0,
@@ -105,7 +135,11 @@ export function readPending(): Order | null {
     const raw = localStorage.getItem(PENDING_KEY);
     if (!raw) return null;
     const order = JSON.parse(raw) as Order;
-    parseStore({ version: 1, capacity: 30, orders: { [order.id]: order } });
+    parseStore({
+      version: 1,
+      capacity: Math.max(CAPACITY, order.quantity),
+      orders: { [order.id]: order },
+    });
     return order;
   } catch {
     return null;
@@ -166,17 +200,23 @@ export async function transact(update: (data: Store) => Store): Promise<Store> {
   );
 }
 export class StockError extends Error {}
+export class OrderDeletedError extends Error {}
+export class SlotValidationError extends Error {}
 export function addOrder(data: Store, order: Order): Store {
   // A retry after a lost network response cannot reserve the same order twice.
+  if (data.deletedOrderIds?.[order.id])
+    throw new OrderDeletedError(
+      "This reservation was deleted by the serving team. Please speak to them or place a new reservation.",
+    );
   if (data.orders[order.id]) return data;
   if (
     !order.name.trim() ||
     order.name.length > 80 ||
     !order.verse.trim() ||
     order.verse.length > 1500 ||
-    !Number.isInteger(order.quantity) ||
+    !Number.isSafeInteger(order.quantity) ||
     order.quantity < 1 ||
-    order.quantity > CAPACITY
+    order.quantity > data.capacity
   ) {
     throw new Error(
       "Please enter your name, a Bible verse, and a valid quantity.",
@@ -186,7 +226,7 @@ export function addOrder(data: Store, order: Order): Store {
   if (order.quantity > available)
     throw new StockError(
       available === 0
-        ? "All 30 ice creams have been reserved. Thank you for the love!"
+        ? `All ${data.capacity} ice creams have been reserved or served. Thank you for the love!`
         : `Only ${available} ice cream${available === 1 ? " is" : "s are"} left. Please adjust your quantity.`,
     );
   return { ...data, orders: { ...data.orders, [order.id]: order } };
@@ -210,4 +250,74 @@ export async function setServed(id: string, served: boolean): Promise<Store> {
       },
     };
   });
+}
+
+// Keep only an anonymous deletion marker so a guest retry cannot resurrect an order.
+export async function deleteOrder(id: string): Promise<Store> {
+  return transact((data) => {
+    const order = data.orders[id];
+    if (!order) return data;
+    const orders = { ...data.orders };
+    delete orders[id];
+    return {
+      ...data,
+      orders,
+      deletedOrderIds: { ...data.deletedOrderIds, [id]: true },
+      deletedServedQuantity:
+        (data.deletedServedQuantity || 0) + (order.served ? order.quantity : 0),
+    };
+  });
+}
+
+export async function increaseSlots(addition: SlotAddition): Promise<Store> {
+  if (
+    !addition.id ||
+    !Number.isSafeInteger(addition.quantity) ||
+    addition.quantity < 1 ||
+    addition.quantity > 1000
+  ) {
+    throw new SlotValidationError(
+      "Enter a whole number from 1 to 1,000 slots.",
+    );
+  }
+  return transact((data) => {
+    if (data.slotAdditions?.[addition.id]) return data;
+    if (!Number.isSafeInteger(data.capacity + addition.quantity))
+      throw new SlotValidationError("The total slot count is too large.");
+    return {
+      ...data,
+      capacity: data.capacity + addition.quantity,
+      slotAdditions: {
+        ...data.slotAdditions,
+        [addition.id]: addition.quantity,
+      },
+    };
+  });
+}
+
+export function readPendingSlots(): SlotAddition | null {
+  try {
+    const raw = localStorage.getItem(PENDING_SLOTS_KEY);
+    if (!raw) return null;
+    const value = JSON.parse(raw) as SlotAddition;
+    return typeof value.id === "string" &&
+      value.id &&
+      Number.isSafeInteger(value.quantity) &&
+      value.quantity >= 1 &&
+      value.quantity <= 1000
+      ? value
+      : null;
+  } catch {
+    return null;
+  }
+}
+export function savePendingSlots(value: SlotAddition | null): void {
+  if (value) safeSave(PENDING_SLOTS_KEY, value);
+  else {
+    try {
+      localStorage.removeItem(PENDING_SLOTS_KEY);
+    } catch {
+      /* Storage may be unavailable. */
+    }
+  }
 }

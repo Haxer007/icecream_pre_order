@@ -265,3 +265,185 @@ test("mobile layout fits the viewport and the form is usable", async ({
     .click();
   await expect(page.getByText("All caught up. How sweet!")).toBeVisible();
 });
+
+test("admin can add slots and customers see the expanded total", async ({
+  page,
+  context,
+}) => {
+  const db = await mockDatabase(context);
+  await page.goto("/");
+  await order(page);
+  await unlock(page);
+  await page.getByLabel("Slots to add").fill("10");
+  await page.getByRole("button", { name: "Add slots", exact: true }).click();
+  await expect(
+    page.getByText("10 slots added. 39 available out of 40 total."),
+  ).toBeVisible();
+  expect(db.read()!.capacity).toBe(40);
+  expect(Object.keys(db.read()!.orders)).toHaveLength(1);
+  await page.goto("/");
+  await expect(page.getByText("39 of 40 ice creams left")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Add slots", exact: true }),
+  ).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText("39 of 40 ice creams left")).toBeVisible();
+});
+
+test("admin can retry a lost restock confirmation after reload without adding twice", async ({
+  page,
+  context,
+}) => {
+  const db = await mockDatabase(context);
+  await unlock(page);
+  await page.getByLabel("Slots to add").fill("7");
+  db.loseWriteResponse();
+  await page.getByRole("button", { name: "Add slots", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Retry adding slots" }),
+  ).toBeEnabled();
+  await page.reload();
+  await page.getByLabel("Team password").fill("JesusSavedMe");
+  await page.getByRole("button", { name: "Open serving dashboard" }).click();
+  await expect(page.getByLabel("Slots to add")).toHaveValue("7");
+  await page.getByRole("button", { name: "Retry adding slots" }).click();
+  await expect(
+    page.getByText("7 slots added. 37 available out of 37 total."),
+  ).toBeVisible();
+  expect(db.read()!.capacity).toBe(37);
+});
+
+test("deleting a waiting order requires confirmation and returns its slots", async ({
+  page,
+  context,
+}) => {
+  const db = await mockDatabase(context);
+  await page.goto("/");
+  await page.getByRole("button", { name: "One more ice cream" }).click();
+  await order(page, "Martha");
+  await unlock(page);
+  await page.getByRole("button", { name: "Delete order for Martha" }).click();
+  await expect(page.getByRole("dialog")).toContainText(
+    "2 slots will become available",
+  );
+  await page.getByRole("button", { name: "Keep order" }).click();
+  expect(Object.keys(db.read()!.orders)).toHaveLength(1);
+  await page.getByRole("button", { name: "Delete order for Martha" }).click();
+  await page.getByRole("button", { name: "Delete order", exact: true }).click();
+  await expect(page.getByRole("dialog")).not.toBeVisible();
+  await expect(page.locator(".admin-order")).toHaveCount(0);
+  expect(db.read()!.orders).toEqual({});
+  await page.goto("/");
+  await expect(page.getByText("30 of 30 ice creams left")).toBeVisible();
+  await expect(page.locator(".my-order")).toHaveCount(0);
+});
+
+test("deleting a served order keeps consumed scoops out of stock", async ({
+  page,
+  context,
+}) => {
+  const db = await mockDatabase(context);
+  await page.goto("/");
+  await order(page, "Martha");
+  await unlock(page);
+  await page
+    .getByRole("button", { name: "Mark as served", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Served 1", exact: true }).click();
+  await page.getByRole("button", { name: "Delete order for Martha" }).click();
+  await expect(page.getByRole("dialog")).toContainText(
+    "No slots will be returned.",
+  );
+  await page.getByRole("button", { name: "Delete order", exact: true }).click();
+  await expect(page.locator(".admin-order")).toHaveCount(0);
+  expect(db.read()!.deletedServedQuantity).toBe(1);
+  await expect(
+    page.locator(".admin-stats > div").nth(2).locator("strong"),
+  ).toHaveText("1");
+  await page.goto("/");
+  await expect(page.getByText("29 of 30 ice creams left")).toBeVisible();
+});
+
+test("live restocking reopens a sold-out form and deletion removes a guest confirmation", async ({
+  page,
+  context,
+}) => {
+  const db = await mockDatabase(context, {
+    version: 1,
+    capacity: 30,
+    orders: {
+      full: {
+        id: "full",
+        clientId: "other",
+        name: "Group",
+        verse: "Psalm 34:8",
+        quantity: 30,
+        createdAt: 100,
+        served: false,
+      },
+    },
+  });
+  await page.goto("/");
+  await expect(
+    page.getByRole("button", { name: "All scooped up!" }),
+  ).toBeDisabled();
+  const adminPage = await context.newPage();
+  await unlock(adminPage);
+  await adminPage.getByLabel("Slots to add").fill("2");
+  await adminPage
+    .getByRole("button", { name: "Add slots", exact: true })
+    .click();
+  await expect(
+    adminPage.getByText("2 slots added. 2 available out of 32 total."),
+  ).toBeVisible();
+  await page.evaluate(() => (window as any).__emitRealtime());
+  await expect(page.getByText("2 of 32 ice creams left")).toBeVisible();
+  await order(page, "Anna");
+  await adminPage.evaluate(() => (window as any).__emitRealtime());
+  await adminPage
+    .getByRole("button", { name: "Delete order for Anna" })
+    .click();
+  await adminPage
+    .getByRole("button", { name: "Delete order", exact: true })
+    .click();
+  await expect(adminPage.getByRole("dialog")).not.toBeVisible();
+  await page.evaluate(() => (window as any).__emitRealtime());
+  await expect(
+    page.getByRole("heading", { name: "You're on the list!" }),
+  ).not.toBeVisible();
+  await expect(
+    page.getByText("Your reservation was deleted by the serving team.", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await expect(page.getByText("2 of 32 ice creams left")).toBeVisible();
+  expect(Object.keys(db.read()!.orders)).toEqual(["full"]);
+});
+
+test("inventory and deletion controls fit on mobile and are disabled offline", async ({
+  page,
+  context,
+}) => {
+  await mockDatabase(context);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  await order(page, "Anna");
+  await unlock(page);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
+    390,
+  );
+  await page.getByRole("button", { name: "Delete order for Anna" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
+    390,
+  );
+  await page.getByRole("button", { name: "Keep order" }).click();
+  await context.route(endpoint, (route) => route.abort());
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(
+    page.getByRole("button", { name: "Add slots", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Delete order for Anna" }),
+  ).toBeDisabled();
+});
