@@ -1,0 +1,213 @@
+export const DATABASE_URL =
+  "https://church-calender-prayers-default-rtdb.firebaseio.com";
+export const DATA_PATH = "church/icecreamPreorders_v1";
+export const ENDPOINT = `${DATABASE_URL}/${DATA_PATH}.json`;
+export const CAPACITY = 30;
+const CACHE_KEY = "scoops-scripture:cache:v1";
+const CLIENT_KEY = "scoops-scripture:client:v1";
+const PENDING_KEY = "scoops-scripture:pending:v1";
+
+export type Order = {
+  id: string;
+  clientId: string;
+  name: string;
+  verse: string;
+  quantity: number;
+  createdAt: number;
+  served: boolean;
+  servedAt?: number | null;
+};
+export type Store = { version: 1; capacity: 30; orders: Record<string, Order> };
+export const emptyStore = (): Store => ({
+  version: 1,
+  capacity: 30,
+  orders: {},
+});
+
+export function parseStore(value: unknown): Store {
+  if (value === null) return emptyStore();
+  const data = value as Store;
+  if (
+    !data ||
+    data.version !== 1 ||
+    data.capacity !== CAPACITY ||
+    (data.orders != null &&
+      (typeof data.orders !== "object" || Array.isArray(data.orders)))
+  ) {
+    throw new Error(
+      "The order database has an unexpected format. Please contact the serving team.",
+    );
+  }
+  const orders = data.orders || {};
+  for (const [key, order] of Object.entries(orders)) {
+    if (
+      !order ||
+      order.id !== key ||
+      typeof order.clientId !== "string" ||
+      typeof order.name !== "string" ||
+      typeof order.verse !== "string" ||
+      !Number.isInteger(order.quantity) ||
+      order.quantity < 1 ||
+      order.quantity > CAPACITY ||
+      typeof order.createdAt !== "number" ||
+      typeof order.served !== "boolean"
+    ) {
+      throw new Error(
+        "An order has an unexpected format. Please contact the serving team.",
+      );
+    }
+  }
+  return { ...data, orders };
+}
+
+export function remaining(data: Store): number {
+  return Math.max(
+    0,
+    CAPACITY -
+      Object.values(data.orders).reduce(
+        (sum, order) => sum + order.quantity,
+        0,
+      ),
+  );
+}
+
+export function safeSave(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* Firebase remains the source of truth if storage is unavailable. */
+  }
+}
+export function readCache(): Store | null {
+  try {
+    const value = localStorage.getItem(CACHE_KEY);
+    return value ? parseStore(JSON.parse(value)) : null;
+  } catch {
+    return null;
+  }
+}
+export function saveCache(data: Store): void {
+  safeSave(CACHE_KEY, data);
+}
+export function clientId(): string {
+  try {
+    const saved = localStorage.getItem(CLIENT_KEY);
+    if (saved) return saved;
+    const id = crypto.randomUUID();
+    localStorage.setItem(CLIENT_KEY, id);
+    return id;
+  } catch {
+    return crypto.randomUUID();
+  }
+}
+export function readPending(): Order | null {
+  try {
+    const raw = localStorage.getItem(PENDING_KEY);
+    if (!raw) return null;
+    const order = JSON.parse(raw) as Order;
+    parseStore({ version: 1, capacity: 30, orders: { [order.id]: order } });
+    return order;
+  } catch {
+    return null;
+  }
+}
+export function savePending(order: Order | null): void {
+  if (order) safeSave(PENDING_KEY, order);
+  else {
+    try {
+      localStorage.removeItem(PENDING_KEY);
+    } catch {
+      /* Storage may be disabled. */
+    }
+  }
+}
+
+async function request(options: RequestInit = {}): Promise<Response> {
+  const response = await fetch(ENDPOINT, {
+    ...options,
+    signal: AbortSignal.timeout(12000),
+    cache: "no-store",
+  });
+  if (!response.ok && response.status !== 412) {
+    throw new Error(
+      response.status === 401 || response.status === 403
+        ? "Database access is unavailable. Please let the serving team know."
+        : "Could not connect to the order database. Please try again.",
+    );
+  }
+  return response;
+}
+
+export async function loadStore(): Promise<Store> {
+  return parseStore(await (await request()).json());
+}
+
+// Firebase REST conditional writes are atomic. Every retry reads the latest stock.
+// Only this dedicated app node is touched; other church data is never written.
+export async function transact(update: (data: Store) => Store): Promise<Store> {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const read = await request({ headers: { "X-Firebase-ETag": "true" } });
+    const etag = read.headers.get("ETag");
+    if (!etag)
+      throw new Error("Could not safely check stock. Please try again.");
+    const next = update(parseStore(await read.json()));
+    const write = await request({
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "If-Match": etag },
+      body: JSON.stringify(next),
+    });
+    if (write.status !== 412) return next;
+    await new Promise((resolve) =>
+      setTimeout(resolve, 60 + Math.random() * 150),
+    );
+  }
+  throw new Error(
+    "Several people are ordering right now. Please retry your reservation.",
+  );
+}
+export class StockError extends Error {}
+export function addOrder(data: Store, order: Order): Store {
+  // A retry after a lost network response cannot reserve the same order twice.
+  if (data.orders[order.id]) return data;
+  if (
+    !order.name.trim() ||
+    order.name.length > 80 ||
+    !order.verse.trim() ||
+    order.verse.length > 1500 ||
+    !Number.isInteger(order.quantity) ||
+    order.quantity < 1 ||
+    order.quantity > CAPACITY
+  ) {
+    throw new Error(
+      "Please enter your name, a Bible verse, and a valid quantity.",
+    );
+  }
+  const available = remaining(data);
+  if (order.quantity > available)
+    throw new StockError(
+      available === 0
+        ? "All 30 ice creams have been reserved. Thank you for the love!"
+        : `Only ${available} ice cream${available === 1 ? " is" : "s are"} left. Please adjust your quantity.`,
+    );
+  return { ...data, orders: { ...data.orders, [order.id]: order } };
+}
+export async function reserve(order: Order): Promise<Store> {
+  return transact((data) => addOrder(data, order));
+}
+export async function setServed(id: string, served: boolean): Promise<Store> {
+  return transact((data) => {
+    if (!data.orders[id])
+      throw new Error("This order could not be found. Refresh and try again.");
+    return {
+      ...data,
+      orders: {
+        ...data.orders,
+        [id]: {
+          ...data.orders[id],
+          served,
+          servedAt: served ? Date.now() : null,
+        },
+      },
+    };
+  });
+}
